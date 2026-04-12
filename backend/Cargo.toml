@@ -23,7 +23,7 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 validator = { version = "0.20", features = ["derive"] }
-rand = "0.9"
+rand = "0.10"
 sha2 = "0.10"
 hex = "0.4"
 
