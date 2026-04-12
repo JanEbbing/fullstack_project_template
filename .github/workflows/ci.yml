@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  backend-lint:
+    name: Backend Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+      - name: Check formatting
+        working-directory: backend
+        run: cargo fmt -- --check
+      - name: Clippy
+        working-directory: backend
+        run: cargo clippy -- -D warnings
+
+  backend-test:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+      - name: Run tests
+        working-directory: backend
+        run: cargo test
+        env:
+          JWT_SECRET: test-secret-for-ci
+
+  frontend-lint:
+    name: Frontend Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Check formatting
+        working-directory: frontend
+        run: npx prettier --check .
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+      - name: Svelte check
+        working-directory: frontend
+        run: npm run check
+
+  frontend-test:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Run tests
+        working-directory: frontend
+        run: npm test
+
+  build-docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: [backend-lint, backend-test, frontend-lint, frontend-test]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t fullstack-app:ci .
+
+  # deploy:
+  #   name: Deploy
+  #   runs-on: ubuntu-latest
+  #   needs: [build-docker]
+  #   if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Log in to container registry
+  #       run: echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login registry.example.com -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
+  #     - name: Build and push
+  #       run: |
+  #         docker build -t registry.example.com/fullstack-app:latest .
+  #         docker push registry.example.com/fullstack-app:latest
+  #     - name: Deploy to production
+  #       run: |
+  #         echo "Add your deployment commands here"
+  #         # Examples:
+  #         # - SSH to server and docker pull + restart
+  #         # - kubectl rollout restart deployment/fullstack-app
+  #         # - fly deploy
+  #         # - railway up

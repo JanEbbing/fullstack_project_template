@@ -3,9 +3,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 
-echo "=== Setting up git hooks ==="
+echo "=== Installing git hooks via pre-commit ==="
 cd "$ROOT_DIR"
-git config core.hooksPath .githooks
+pre-commit install
 
 echo "=== Installing frontend dependencies ==="
 cd "$ROOT_DIR/frontend"

@@ -27,8 +27,5 @@ data/
 .DS_Store
 Thumbs.db
 
-# Git hooks
-.githooks/
-
 # Claude
 .claude/

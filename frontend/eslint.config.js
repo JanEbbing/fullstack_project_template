@@ -16,6 +16,12 @@ export default [
         },
     },
     {
+        rules: {
+            // Not applicable in SPA mode — no server-side resolve() needed
+            'svelte/no-navigation-without-resolve': 'off',
+        },
+    },
+    {
         languageOptions: {
             globals: {
                 ...globals.browser,

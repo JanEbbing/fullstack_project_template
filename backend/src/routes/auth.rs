@@ -5,7 +5,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use validator::Validate;
+use validator::{Validate, ValidationError};
+
+use subtle::ConstantTimeEq;
 
 use crate::auth::jwt;
 use crate::auth::middleware::AuthUser;
@@ -18,11 +20,23 @@ fn sha256_hex(input: &str) -> String {
     hex::encode(Sha256::digest(input.as_bytes()))
 }
 
+fn validate_password_complexity(password: &str) -> Result<(), ValidationError> {
+    if !password.chars().any(|c| c.is_alphabetic()) || !password.chars().any(|c| c.is_ascii_digit())
+    {
+        return Err(ValidationError::new("password_complexity")
+            .with_message("Password must contain at least one letter and one digit".into()));
+    }
+    Ok(())
+}
+
 #[derive(Deserialize, Validate)]
 pub struct RegisterRequest {
     #[validate(email)]
     pub email: String,
-    #[validate(length(min = 8, max = 128))]
+    #[validate(
+        length(min = 8, max = 128),
+        custom(function = "validate_password_complexity")
+    )]
     pub password: String,
 }
 
@@ -57,25 +71,28 @@ pub async fn register(
             _ => AppError::Internal(e.to_string()),
         })?;
 
-        let user = conn.query_row(
-            "SELECT id, email, created_at FROM users WHERE id = ?1",
-            params![uid],
-            |row| {
-                Ok(UserResponse {
-                    id: row.get(0)?,
-                    email: row.get(1)?,
-                    created_at: row.get(2)?,
-                })
-            },
-        ).map_err(|e| AppError::Internal(e.to_string()))?;
+        let user = conn
+            .query_row(
+                "SELECT id, email, created_at FROM users WHERE id = ?1",
+                params![uid],
+                |row| {
+                    Ok(UserResponse {
+                        id: row.get(0)?,
+                        email: row.get(1)?,
+                        created_at: row.get(2)?,
+                    })
+                },
+            )
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
         Ok::<_, AppError>(user)
     })
     .await
     .map_err(|e| AppError::Internal(e.to_string()))??;
 
-    let (access_token, refresh_token) =
-        create_token_pair(&state, &user_id, &email)?;
+    let (access_token, refresh_token) = create_token_pair(&state, &user_id, &email).await?;
+
+    tracing::info!(event = "user_registered", user_id = %user_id, email = %email);
 
     Ok((
         axum::http::StatusCode::CREATED,
@@ -122,12 +139,15 @@ pub async fn login(
     let (id, email, password_hash, created_at) = user;
 
     if !password::verify_password(&body.password, &password_hash)? {
+        tracing::warn!(event = "login_failed", email = %body.email, reason = "wrong_password");
         return Err(AppError::Unauthorized(
             "Invalid email or password".to_string(),
         ));
     }
 
-    let (access_token, refresh_token) = create_token_pair(&state, &id, &email)?;
+    let (access_token, refresh_token) = create_token_pair(&state, &id, &email).await?;
+
+    tracing::info!(event = "user_login", user_id = %id, email = %email);
 
     Ok(Json(json!({
         "user": UserResponse { id, email, created_at },
@@ -154,59 +174,63 @@ pub async fn refresh(
 
     let user_id = claims.sub.clone();
 
-    let email = tokio::task::spawn_blocking(move || {
-        let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+    let email =
+        tokio::task::spawn_blocking(move || {
+            let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
 
-        // Verify the refresh token exists, is not revoked, and hash matches
-        let (stored_user_id, stored_hash, revoked): (String, String, bool) = conn
-            .query_row(
-                "SELECT user_id, token_hash, revoked FROM refresh_tokens WHERE id = ?1",
+            // Verify the refresh token exists, is not revoked, and hash matches
+            let (stored_user_id, stored_hash, revoked, expires_at): (String, String, bool, String) =
+            conn.query_row(
+                "SELECT user_id, token_hash, revoked, expires_at FROM refresh_tokens WHERE id = ?1",
                 params![jti],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, bool>(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, bool>(2)?, row.get(3)?)),
             )
             .map_err(|_| AppError::Unauthorized("Invalid refresh token".to_string()))?;
 
-        if revoked {
-            return Err(AppError::Unauthorized(
-                "Refresh token has been revoked".to_string(),
-            ));
-        }
+            if revoked {
+                return Err(AppError::Unauthorized(
+                    "Refresh token has been revoked".to_string(),
+                ));
+            }
 
-        if stored_hash != th {
-            return Err(AppError::Unauthorized(
-                "Invalid refresh token".to_string(),
-            ));
-        }
+            if stored_hash.as_bytes().ct_eq(th.as_bytes()).unwrap_u8() != 1 {
+                return Err(AppError::Unauthorized("Invalid refresh token".to_string()));
+            }
 
-        if stored_user_id != claims.sub {
-            return Err(AppError::Unauthorized(
-                "Token user mismatch".to_string(),
-            ));
-        }
+            if stored_user_id != claims.sub {
+                return Err(AppError::Unauthorized("Token user mismatch".to_string()));
+            }
 
-        // Revoke the old refresh token
-        conn.execute(
-            "UPDATE refresh_tokens SET revoked = 1 WHERE id = ?1",
-            params![jti],
-        )
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+            // Guard against clock skew: reject if DB row has already expired
+            let exp = chrono::NaiveDateTime::parse_from_str(&expires_at, "%Y-%m-%d %H:%M:%S")
+                .map(|dt| dt.and_utc())
+                .map_err(|_| AppError::Internal("Invalid expiry format in DB".into()))?;
+            if exp < chrono::Utc::now() {
+                return Err(AppError::Unauthorized("Refresh token expired".to_string()));
+            }
 
-        // Get user email for new access token
-        let email: String = conn
-            .query_row(
-                "SELECT email FROM users WHERE id = ?1",
-                params![claims.sub],
-                |row| row.get(0),
+            // Revoke the old refresh token
+            conn.execute(
+                "UPDATE refresh_tokens SET revoked = 1 WHERE id = ?1",
+                params![jti],
             )
-            .map_err(|_| AppError::Unauthorized("User not found".to_string()))?;
+            .map_err(|e| AppError::Internal(e.to_string()))?;
 
-        Ok::<_, AppError>(email)
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.to_string()))??;
+            // Get user email for new access token
+            let email: String = conn
+                .query_row(
+                    "SELECT email FROM users WHERE id = ?1",
+                    params![claims.sub],
+                    |row| row.get(0),
+                )
+                .map_err(|_| AppError::Unauthorized("User not found".to_string()))?;
 
-    let (access_token, refresh_token) =
-        create_token_pair(&state, &user_id, &email)?;
+            Ok::<_, AppError>(email)
+        })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))??;
+
+    let (access_token, refresh_token) = create_token_pair(&state, &user_id, &email).await?;
 
     Ok(Json(json!({
         "access_token": access_token,
@@ -230,8 +254,7 @@ pub async fn forgot_password(
     let raw_token = Uuid::new_v4().to_string();
     let token_hash = sha256_hex(&raw_token);
     let token_id = Uuid::new_v4().to_string();
-    let expires_at =
-        chrono::Utc::now() + chrono::Duration::hours(1);
+    let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
     let expires_at_str = expires_at.format("%Y-%m-%d %H:%M:%S").to_string();
 
     let db = state.db.clone();
@@ -272,6 +295,10 @@ pub async fn forgot_password(
         });
     }
 
+    if found {
+        tracing::info!(event = "password_reset_requested", email = %body.email);
+    }
+
     // Always return success to prevent email enumeration
     Ok(Json(json!({
         "message": "If an account with that email exists, a reset link has been sent."
@@ -280,6 +307,7 @@ pub async fn forgot_password(
 
 #[derive(Deserialize, Validate)]
 pub struct ResetPasswordRequest {
+    #[validate(length(equal = 36))]
     pub token: String,
     #[validate(length(min = 8, max = 128))]
     pub new_password: String,
@@ -306,9 +334,7 @@ pub async fn reset_password(
                 params![token_hash],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .map_err(|_| {
-                AppError::BadRequest("Invalid or expired reset token".to_string())
-            })?;
+            .map_err(|_| AppError::BadRequest("Invalid or expired reset token".to_string()))?;
 
         conn.execute(
             "UPDATE users SET password_hash = ?1, updated_at = datetime('now') WHERE id = ?2",
@@ -334,6 +360,8 @@ pub async fn reset_password(
     .await
     .map_err(|e| AppError::Internal(e.to_string()))??;
 
+    tracing::info!(event = "password_reset_completed");
+
     Ok(Json(json!({
         "message": "Password has been reset successfully."
     })))
@@ -345,7 +373,7 @@ pub struct LogoutRequest {
 }
 
 pub async fn logout(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Json(body): Json<LogoutRequest>,
 ) -> Result<Json<Value>, AppError> {
@@ -364,13 +392,15 @@ pub async fn logout(
     .await
     .map_err(|e| AppError::Internal(e.to_string()))??;
 
+    tracing::info!(event = "user_logout", user_id = %auth_user.user_id);
+
     Ok(Json(json!({
         "message": "Logged out successfully."
     })))
 }
 
 /// Create a new access/refresh token pair and store the refresh token in the DB.
-fn create_token_pair(
+async fn create_token_pair(
     state: &AppState,
     user_id: &str,
     email: &str,
@@ -392,21 +422,23 @@ fn create_token_pair(
     )?;
 
     let token_hash = sha256_hex(&refresh_token);
-    let expires_at = chrono::Utc::now()
-        + chrono::Duration::seconds(state.config.jwt_refresh_expiry_secs);
+    let expires_at =
+        chrono::Utc::now() + chrono::Duration::seconds(state.config.jwt_refresh_expiry_secs);
     let expires_at_str = expires_at.format("%Y-%m-%d %H:%M:%S").to_string();
 
     let db = state.db.clone();
     let tid = token_id.clone();
     let uid = user_id.to_string();
-    // Store synchronously since we're not in an async context that requires spawn_blocking
-    // and this is called within handlers that will handle the error
-    let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
-    conn.execute(
-        "INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) VALUES (?1, ?2, ?3, ?4)",
-        params![tid, uid, token_hash, expires_at_str],
-    )
-    .map_err(|e| AppError::Internal(e.to_string()))?;
+    tokio::task::spawn_blocking(move || {
+        let conn = db.lock().map_err(|e| AppError::Internal(e.to_string()))?;
+        conn.execute(
+            "INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) VALUES (?1, ?2, ?3, ?4)",
+            params![tid, uid, token_hash, expires_at_str],
+        )
+        .map_err(|e| AppError::Internal(e.to_string()))
+    })
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))??;
 
     Ok((access_token, refresh_token))
 }

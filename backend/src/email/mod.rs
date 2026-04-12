@@ -22,8 +22,8 @@ impl EmailService {
     pub fn from_config(config: &Config) -> Self {
         let transport = match &config.smtp_host {
             Some(host) => {
-                let mut builder = AsyncSmtpTransport::<Tokio1Executor>::relay(host)
-                    .expect("Invalid SMTP host");
+                let mut builder =
+                    AsyncSmtpTransport::<Tokio1Executor>::relay(host).expect("Invalid SMTP host");
 
                 if let (Some(username), Some(password)) =
                     (&config.smtp_username, &config.smtp_password)
@@ -52,7 +52,11 @@ impl EmailService {
     }
 
     pub async fn send_password_reset(&self, to: &str, token: &str) -> Result<(), AppError> {
-        let reset_url = format!("{}/reset-password?token={}", self.frontend_url, token);
+        let reset_url = format!(
+            "{}/reset-password?token={}",
+            self.frontend_url.trim_end_matches('/'),
+            token
+        );
         let body = templates::password_reset_email(&reset_url);
 
         let message = Message::builder()

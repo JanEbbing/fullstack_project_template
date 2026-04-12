@@ -1,9 +1,10 @@
 import { sveltekit } from '@sveltejs/kit/vite';
+import { svelteTesting } from '@testing-library/svelte/vite';
 import tailwindcss from '@tailwindcss/vite';
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-    plugins: [tailwindcss(), sveltekit()],
+    plugins: [tailwindcss(), sveltekit(), svelteTesting()],
     server: {
         proxy: {
             '/api': {
@@ -15,5 +16,6 @@ export default defineConfig({
     test: {
         environment: 'jsdom',
         include: ['tests/**/*.test.ts'],
+        setupFiles: ['./vitest-setup.ts'],
     },
 });

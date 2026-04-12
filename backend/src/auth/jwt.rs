@@ -75,9 +75,7 @@ pub fn verify_access_token(token: &str, secret: &str) -> Result<AccessClaims, Ap
     .map_err(|e| AppError::Unauthorized(format!("Invalid access token: {e}")))?;
 
     if token_data.claims.token_type != "access" {
-        return Err(AppError::Unauthorized(
-            "Invalid token type".to_string(),
-        ));
+        return Err(AppError::Unauthorized("Invalid token type".to_string()));
     }
 
     Ok(token_data.claims)
@@ -92,9 +90,7 @@ pub fn verify_refresh_token(token: &str, secret: &str) -> Result<RefreshClaims, 
     .map_err(|e| AppError::Unauthorized(format!("Invalid refresh token: {e}")))?;
 
     if token_data.claims.token_type != "refresh" {
-        return Err(AppError::Unauthorized(
-            "Invalid token type".to_string(),
-        ));
+        return Err(AppError::Unauthorized("Invalid token type".to_string()));
     }
 
     Ok(token_data.claims)
@@ -108,8 +104,7 @@ mod tests {
 
     #[test]
     fn create_and_verify_access_token() {
-        let token =
-            create_access_token("user-123", "test@example.com", TEST_SECRET, 300).unwrap();
+        let token = create_access_token("user-123", "test@example.com", TEST_SECRET, 300).unwrap();
         let claims = verify_access_token(&token, TEST_SECRET).unwrap();
         assert_eq!(claims.sub, "user-123");
         assert_eq!(claims.email, "test@example.com");
@@ -144,8 +139,7 @@ mod tests {
 
     #[test]
     fn invalid_secret_rejected() {
-        let token =
-            create_access_token("user-123", "test@example.com", TEST_SECRET, 300).unwrap();
+        let token = create_access_token("user-123", "test@example.com", TEST_SECRET, 300).unwrap();
         assert!(verify_access_token(&token, "wrong-secret").is_err());
     }
 

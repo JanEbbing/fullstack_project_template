@@ -82,6 +82,7 @@ pub async fn list_data(
 pub struct CreateUserDataRequest {
     #[validate(length(min = 1, max = 255))]
     pub title: String,
+    #[validate(length(max = 65536))]
     pub content: String,
 }
 
@@ -125,5 +126,8 @@ pub async fn create_data(
     .await
     .map_err(|e| AppError::Internal(e.to_string()))??;
 
-    Ok((axum::http::StatusCode::CREATED, Json(json!({ "data": item }))))
+    Ok((
+        axum::http::StatusCode::CREATED,
+        Json(json!({ "data": item })),
+    ))
 }

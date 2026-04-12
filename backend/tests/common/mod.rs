@@ -55,6 +55,6 @@ impl TestApp {
     }
 
     pub fn url(&self, path: &str) -> String {
-        format!("{}/api{}", self.addr, path)
+        format!("{}/api/v1{}", self.addr, path)
     }
 }
